@@ -1,0 +1,36 @@
+# Configuration file for AI-Powered Voice-Assisted Object Locator (AIVOL)
+
+system:
+  name: "AIVOL"
+  version: "1.0.0"
+  python_required: "3.11"
+
+logging:
+  level: "INFO"
+  file: "logs/aivol.log"
+
+audio:
+  sample_rate: 44100
+  channels: 1
+  chunk_size: 1024
+  wake_word: "Hey AIVOL"
+
+vision:
+  model_path: "models/yolo/yolo.weights"
+  config_path: "models/yolo/yolo.cfg"
+  class_names: "models/yolo/coco.names"
+  confidence_threshold: 0.5
+  nms_threshold: 0.4
+
+device:
+  camera_index: 0 # Default camera
+  microphone_index: -1 # Auto-detect
+
+startup:
+  check_directories:
+    - "models/yolo"
+    - "logs"
+  check_files:
+    - "models/yolo/yolo.weights"
+    - "models/yolo/yolo.cfg"
+    - "models/yolo/coco.names"

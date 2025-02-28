@@ -1,1 +1,26 @@
-rpi/
+# Virtual Environment (Do NOT push the venv folder)
+venv/
+.env
+
+# Python Cache & Compiled Files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# OS-Specific Files
+.DS_Store
+Thumbs.db
+
+# Pyenv Python Version Management
+.python-version
+
+# Large Model Files
+models/yolo/yolo.weights
+
+# Jupyter Notebook Checkpoints (if using Jupyter)
+.ipynb_checkpoints/
+
+# User-Specific Configuration
+*.swp  # Vim swap files

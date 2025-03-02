@@ -68,7 +68,7 @@ pip install --upgrade -r requirements.txt
 # ------------------ Step 6: Download YOLO Weights ------------------
 
 YOLO_WEIGHTS_PATH="models/yolo/yolov8s.pt"
-YOLO_WEIGHTS_URL="https://github.com/ultralytics/ultralytics/releases/download/v8.8.1/yolov8s.pt"
+YOLO_WEIGHTS_URL="https://ultralytics.com/assets/yolov8s.pt"
 
 echo "🛠️ Ensuring YOLO model directory exists..."
 mkdir -p models/yolo

@@ -99,22 +99,27 @@ python3 src/main.py
 
 ## 📌 Troubleshooting Guide
 
-### **🐛 Issue: `pyenv: command not found`**
+If you encounter any issues during the setup, the script will now immediately exit and display an error message. For example, if Python or the dependencies are not installed correctly, you will see a message like:
 
-Run:
+```bash
+❌ An error occurred during the setup. Please review the error messages above and refer to the Troubleshooting Guide in README.md.
+```
+
+### Common troubleshooting steps:
+
+⚠️ pyenv not found:
+Run the following commands to add pyenv to your shell environment and restart your terminal:
 
 ```bash
 export PATH="$HOME/.pyenv/bin:$PATH"
 eval "$(pyenv init --path)"
 eval "$(pyenv init -)"
 eval "$(pyenv virtualenv-init -)"
-```
-
-Then restart your terminal:
-
-```bash
 exec "$SHELL"
 ```
+
+⚠️ Dependency Installation Failures:
+Ensure that you are connected to the internet and that your system package manager (apt) has successfully updated. If errors persist, try running the setup script again after addressing any specific error messages shown.
 
 ---
 

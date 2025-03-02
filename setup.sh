@@ -1,5 +1,8 @@
 #!/bin/bash
 
+set -e
+trap 'echo "❌ An error occurred during the setup. Please review the error messages above and refer to the Troubleshooting Guide in README.md." && exit 1' ERR
+
 echo "🚀 Setting up AIVOL Environment..."
 
 # ------------------ Step 1: Install System Dependencies ------------------
@@ -60,12 +63,12 @@ echo "🚀 Upgrading pip, setuptools, and wheel..."
 pip install --upgrade pip setuptools wheel
 
 echo "📥 Installing Python dependencies..."
-pip install -r requirements.txt
+pip install --upgrade -r requirements.txt
 
 # ------------------ Step 6: Download YOLO Weights ------------------
 
-YOLO_WEIGHTS_PATH="models/yolo/yolo.weights"
-YOLO_WEIGHTS_URL="https://github.com/ultralytics/yolov5/releases/download/v6.0/yolov5s.pt"
+YOLO_WEIGHTS_PATH="models/yolo/yolov8s.pt"
+YOLO_WEIGHTS_URL="https://github.com/ultralytics/ultralytics/releases/download/v8.8.1/yolov8s.pt"
 
 echo "🛠️ Ensuring YOLO model directory exists..."
 mkdir -p models/yolo

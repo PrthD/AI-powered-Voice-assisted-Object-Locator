@@ -25,6 +25,8 @@ def get_voice_command(timeout: int = 5, phrase_time_limit: int = 30, ambient_noi
     """
     recognizer = sr.Recognizer()
     try:
+        # Uncomment the following line when running on RPi
+        # with sr.Microphone(device_index=2) as source:
         with sr.Microphone() as source:
             logger.info(
                 "Adjusting for ambient noise for %.2f seconds...", ambient_noise_duration)

@@ -14,8 +14,12 @@
 
     *** ALL STEPS AND TESTS MENTIONED ABOVE APPLIED ON WSL ONLY ***
 
-    Also, the audio quality is shit in WSL comparing to running on Windows. I don't really know why
-    Also, for some reasons, this doesn't work in venv and I don't know why
+    Also, the audio quality is shit in WSL comparing to running on Windows. I don't really know why.
+    Also, for some reasons, this doesn't work in venv and I don't know why.
+
+    A better version can be seen in text_to_speech2.py, where gTTS is used instead of pyttsx3. It provides
+    a better audio quality but produce an extra .mp3 file and therefor maybe extra delay. Also it may
+    require internet connection.
 '''
 
 import pyttsx3

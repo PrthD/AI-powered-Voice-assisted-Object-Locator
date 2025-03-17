@@ -8,7 +8,6 @@
 from gtts import gTTS
 import pygame
 import os
-import signal
 
 class Text2Speech:
     '''

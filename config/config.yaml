@@ -16,7 +16,7 @@ audio:
   wake_word: "Hey AIVOL"
 
 vision:
-  model_path: "models/yolo/yolov8s.pt"
+  model_path: "models/yolo/yolov5m_Objects365.pt"
   # config_path: "models/yolo/yolo.cfg"
   class_names: "models/yolo/coco.names"
   confidence_threshold: 0.5
@@ -31,6 +31,6 @@ startup:
     - "models/yolo"
     - "logs"
   check_files:
-    - "models/yolo/yolov8s.pt"
+    - "models/yolo/yolov5m_Objects365.pt"
     # - "models/yolo/yolo.cfg"
     - "models/yolo/coco.names"

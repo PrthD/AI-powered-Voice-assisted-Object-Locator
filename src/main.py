@@ -3,23 +3,25 @@
 AIVOL - AI-powered Voice-assisted Object Locator
 Main Controller Module
 
-This module serves as the main entry point for the AIVOL system,
-coordinating the voice recognition, text processing, object detection,
-and feedback components.
+This module integrates voice recognition, text processing, object detection,
+and detection filtering.
 """
 
 from text.text_processor import ObjectInfo
-from integration.voice_to_object import VoiceObjectExtractor
+from vision.object_detection import YOLODetector
+from integration.detection_filter import filter_detections
+from integration.voice_to_object import extract_object_from_voice
 import sys
 import os
 import logging
 import yaml
-from typing import Dict, Any, Optional
+import cv2
+from typing import Dict, Any
 
-# Add the parent directory to the path to make imports work when running directly
+# Add parent directory to the path for proper imports
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
-# Import integration module
+# Import integration modules
 
 # Setup Logging
 logging.basicConfig(
@@ -36,99 +38,88 @@ logger = logging.getLogger("AIVOL.main")
 def load_config() -> Dict[str, Any]:
     """
     Load configuration from config.yaml file.
-
-    Returns:
-        Dict[str, Any]: Configuration dictionary
     """
     try:
         config_path = os.path.join(os.path.dirname(
             os.path.dirname(__file__)), 'config.yaml')
-        with open(config_path, 'r') as config_file:
-            config = yaml.safe_load(config_file)
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
             logger.info("Configuration loaded successfully.")
             return config
     except Exception as e:
         logger.error("Error loading configuration: %s", e)
         return {}
 
-# Initialize Components
-
 
 def initialize_system():
     logger.info(
         "Initializing AI-Powered Voice-Assisted Object Locator (AIVOL)...")
-
-    # Check Python version
-    if sys.version_info[:2] != (3, 11):
-        logger.warning(
-            "Python 3.11 is required. Current version: %s", sys.version)
-
     # Check required directories
     required_dirs = ["models/yolo", "logs"]
     for directory in required_dirs:
         if not os.path.exists(directory):
             os.makedirs(directory)
             logger.info("Created missing directory: %s", directory)
-
     logger.info("System initialization complete.")
-
-# Placeholder for Audio Module: Simulate capturing a voice command
-
-
-def capture_voice_command():
-    logger.info("Capturing voice command... (Placeholder)")
-    # Simulate a dummy command
-    dummy_command = "Locate the cup"
-    logger.info("Voice command captured: '%s'", dummy_command)
-    return dummy_command
-
-# Placeholder for Vision Module: Simulate object detection
-
-
-def detect_object(command):
-    logger.info("Processing command: '%s'", command)
-    logger.info("Simulating object detection... (Placeholder)")
-    # Return a dummy detection result
-    detection_result = "Cup detected at dummy location"
-    logger.info("Detection result: '%s'", detection_result)
-    return detection_result
-
-# Placeholder for Text-to-Speech Module: Simulate audio output
-
-
-def speak_response(response):
-    logger.info("Simulating text-to-speech output... (Placeholder)")
-    # For now, just print the response as a simulation
-    print("TTS Output:", response)
 
 
 def main():
     logger.info("Starting AIVOL Main Controller...")
 
-    # Load configuration
+    # Load configuration (if needed)
     config = load_config()
 
-    # Initialize system components and directories
+    # Initialize system components
     initialize_system()
 
-    # --- Walking Skeleton: End-to-End Flow ---
-    try:
-        # Step 1: Capture voice command
-        voice_command = capture_voice_command()
+    # ---- Integration Step 1: Voice-to-Object Extraction ----
+    object_info, voice_command = extract_object_from_voice()
+    if not voice_command:
+        logger.warning(
+            "No voice command recognized; using default test query.")
+        # Create a default query for testing
+        voice_command = "hey can you help me find my wallet it's black in color and it's usually on the dining table"
+        object_info = ObjectInfo("wallet")
+        object_info.color = "black"
+        object_info.location = "on the dining table"
 
-        # Step 2: Process voice command with vision module stub
-        detection_result = detect_object(voice_command)
+    logger.info("Voice command: %s", voice_command)
+    logger.info("Extracted object info: %s", object_info)
 
-        # Step 3: Provide feedback via TTS module stub
-        speak_response(detection_result)
-
-        logger.info("Walking skeleton executed successfully.")
-    except Exception as e:
-        logger.error(
-            "An error occurred during the walking skeleton execution: %s", e)
+    # ---- Integration Step 2: Object Detection on a Sample Image ----
+    detector = YOLODetector()  # Loads the pretrained YOLOv5m_Objects365.pt model
+    sample_image_path = "tests/sample.png"
+    image = cv2.imread(sample_image_path)
+    if image is None:
+        logger.error("Sample image not found at %s", sample_image_path)
         sys.exit(1)
 
-    logger.info("AIVOL is ready for further development!")
+    detections = detector.detect(image)
+    logger.info("Raw detections: %s", detections)
+
+    # ---- Integration Step 3: Filter Detections Based on Query ----
+    # Convert object_info to dictionary for filtering purposes.
+    query = object_info.to_dict()
+    filtered = filter_detections(query, detections)
+    logger.info("Filtered detections: %s", filtered)
+
+    # Print the results
+    print("Voice Command:", voice_command)
+    print("Extracted Object Info:", query)
+    print("Filtered Detection Results:", filtered)
+
+    # Optional: Display image with all detections for visual debugging
+    for det in detections:
+        x1, y1, x2, y2 = map(int, det["bbox"])
+        cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.putText(image, f"{det['label']} {det['confidence']:.2f}",
+                    (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+    cv2.imshow("Detections", image)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()
+
+    logger.info(
+        "Integration test complete. AIVOL is ready for further development!")
 
 
 if __name__ == "__main__":

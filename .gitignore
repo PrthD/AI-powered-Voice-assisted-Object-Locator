@@ -18,7 +18,7 @@ Thumbs.db
 
 # Large Model Files
 models/yolo/yolo.weights
-models/yolo/yolov8s.pt
+models/yolo/yolov5m_Objects365.pt
 
 # Jupyter Notebook Checkpoints (if using Jupyter)
 .ipynb_checkpoints/

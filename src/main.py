@@ -1,63 +1,77 @@
 #!/usr/bin/env python3
 """
-AIVOL - AI-powered Voice-assisted Object Locator
-Merged Wake-Word + Person-Relative Detection
+Threaded approach:
+1) One background thread constantly listens for "Hey Assistant."
+2) Main thread does detection. If user says "Hey Assistant," we set a shared interrupt flag.
+3) 30s timeout if object not found, speak "not found," return to idle.
+4) Speak "I'm listening" before capturing user object command.
 
-1) Wait for user to say "Hey Assistant."
-2) Listen for the object's name (e.g., "Find my wallet.")
-3) Detect both "person" and the target object in the same camera frame.
-4) Provide directions relative to the person's bounding box (left/right/above/below).
-5) Return to idle state after finishing, waiting again for "Hey Assistant."
-
-Use:
-  voice_recognition.py (with device_index=2) for capturing audio.
-  text_processor.py for parsing the object from the user’s command.
-  object_detection.py + detection_filter.py for YOLO + filtering.
+Assumes you have:
+- audio.voice_recognition -> get_voice_command
+- audio.text_to_speech_gTTS -> GTTSSpeaker
+- text.text_processor -> process_user_prompt
+- vision.object_detection -> YOLODetector
+- integration.detection_filter -> filter_detections
+- vision.mediapipe_tracker -> MediaPipeTracker
 """
 
 import sys
 import os
 import logging
 import time
+import math
 import cv2
 import yaml
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional, List
+import threading
 
-# ----------------------------------------------------------------------
-# Imports for voice & detection
-# ----------------------------------------------------------------------
-# Make sure these align with your project structure
+# Audio input
 from audio.voice_recognition import get_voice_command
-from text.text_processor import process_user_prompt, ObjectInfo
+# gTTS TTS
+from audio.text_to_speech_gTTS import GTTSSpeaker
+# text processing
+from text.text_processor import process_user_prompt
+# YOLO detection
 from vision.object_detection import YOLODetector
+# detection filter
 from integration.detection_filter import filter_detections
+# mediapipe
+from vision.mediapipe_tracker import MediaPipeTracker
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('aivol_person_relative.log')
+        logging.FileHandler('aivol_threaded.log')
     ]
 )
 logger = logging.getLogger("AIVOL.main")
 
-# ----------------------------------------------------------------------
-# Configuration / Constants
-# ----------------------------------------------------------------------
+# Wake-word constants
 WAKE_WORD = "hey assistant"
-WAKE_WORD_ALTS = {WAKE_WORD, "hey assistant."}  # handle punctuation
+WAKE_WORD_ALTS = {WAKE_WORD, "hey assistant."}
 WAKE_TIMEOUT = 5
 WAKE_PHRASE_LIMIT = 2
 
+# Command capture
 CMD_TIMEOUT = 5
 CMD_PHRASE_LIMIT = 30
 
+OBJECT_FIND_TIMEOUT_SECS = 20.0  # If object not found, speak and exit
+
+class SharedState:
+    """
+    Holds shared flags/data that both the main thread (detection) and
+    the wake-word listener thread can access.
+    """
+    def __init__(self):
+        # If True, detection should stop
+        self.interrupt_detection = False
+        # If True, we want to exit the entire program
+        self.exit_program = False
 
 def load_config() -> Dict[str, Any]:
-    """
-    Load configuration from config.yaml if available. Otherwise defaults.
-    """
     base_dir = os.path.dirname(__file__)
     config_path = os.path.join(base_dir, "config.yaml")
     config = {}
@@ -67,330 +81,364 @@ def load_config() -> Dict[str, Any]:
                 config = yaml.safe_load(f)
                 logger.info("Configuration loaded from %s", config_path)
         except Exception as e:
-            logger.error("Error loading configuration: %s", e)
+            logger.error(f"Error loading configuration: {e}")
     else:
         logger.warning("No config.yaml file found. Using defaults.")
     return config
 
-
 def initialize_system():
-    """
-    Create needed directories & basic setup.
-    """
-    logger.info("Initializing AIVOL system (Wake Word + Person-Relative).")
-    for directory in ["models/yolo", "logs"]:
-        if not os.path.exists(directory):
-            os.makedirs(directory)
-            logger.info("Created missing directory: %s", directory)
+    logger.info("Initializing AIVOL system (Threaded, YOLO, MediaPipe, gTTS).")
+    for d in ["models/yolo", "logs"]:
+        if not os.path.exists(d):
+            os.makedirs(d)
+            logger.info("Created missing directory: %s", d)
     logger.info("System initialization complete.")
 
-
-# ----------------------------------------------------------------------
-# Wake Word Listening
-# ----------------------------------------------------------------------
-def listen_for_wake_word() -> bool:
+def wake_word_listener(state: SharedState, speaker: GTTSSpeaker):
     """
-    Continuously do short captures to detect the wake word. 
-    Return True once recognized, or False if user interrupts.
+    Background thread that constantly listens for short segments to detect "Hey Assistant."
+    If recognized, set state.interrupt_detection = True
+    If the main loop sets state.exit_program = True, we stop.
     """
-    logger.info("[Idle] Listening for wake word: '%s'", WAKE_WORD)
-    while True:
+    logger.info("WakeWordListener thread started.")
+    while not state.exit_program:
         try:
             phrase = get_voice_command(
-                timeout=WAKE_TIMEOUT,
-                phrase_time_limit=WAKE_PHRASE_LIMIT,
-                ambient_noise_duration=0.5
+                timeout=1,             # short wait
+                phrase_time_limit=10,  # short phrase
+                ambient_noise_duration=0.3
             )
-            if phrase is None:
-                logger.info("No wake word detected this round. Retrying...")
-                continue
+            if phrase:
+                phrase_low = phrase.lower().strip()
+                if phrase_low in WAKE_WORD_ALTS:
+                    logger.info("Wake word re-detected in background thread. Setting interrupt.")
+                    state.interrupt_detection = True
+        except:
+            # If there's any error or waitTimeout
+            pass
 
-            phrase = phrase.lower().strip()
-            logger.info("Heard: '%s'", phrase)
-            if phrase in WAKE_WORD_ALTS:
-                logger.info("Wake word detected! Proceeding...")
-                return True
-            else:
-                logger.info("Not the wake word. Listening again.")
-        except KeyboardInterrupt:
-            logger.info("KeyboardInterrupt. Exiting wake word loop.")
-            return False
+        # small sleep so we don't spin CPU if user isn't speaking
+        time.sleep(0.1)
+    logger.info("WakeWordListener thread stopping.")
 
-
-# ----------------------------------------------------------------------
-# Command Listening
-# ----------------------------------------------------------------------
-def listen_for_command() -> Optional[str]:
+def get_user_command(speaker: GTTSSpeaker) -> Optional[str]:
     """
-    After hearing wake word, capture a longer command from user.
-    E.g., "Find my black wallet."
+    Speak "I'm listening," then do a longer capture for the user command.
     """
-    logger.info("[Active] Listening for user command (long capture).")
+    if speaker:
+        speaker.speak("I'm listening now. Please tell me the object you want me to find.")
     command = get_voice_command(
         timeout=CMD_TIMEOUT,
         phrase_time_limit=CMD_PHRASE_LIMIT,
         ambient_noise_duration=0.5
     )
     if command:
-        logger.info("User command recognized: %s", command)
         return command.lower().strip()
-    else:
-        logger.warning("No user command recognized (timed out or error).")
-        return None
+    return None
 
+def choose_nearest_object(detections: List[dict], user_cx: float, user_cy: float) -> dict:
+    best_det = {}
+    best_dist = float('inf')
+    for det in detections:
+        x1, y1, x2, y2 = det["bbox"]
+        objcx = (x1 + x2)/2
+        objcy = (y1 + y2)/2
+        dist = math.hypot(objcx - user_cx, objcy - user_cy)
+        if dist < best_dist:
+            best_dist = dist
+            best_det = det
+    return best_det
 
-# ----------------------------------------------------------------------
-# Person-Relative Logic
-# ----------------------------------------------------------------------
-def find_best_person(detections: List[dict]) -> dict:
-    """
-    Among YOLO detections, pick bounding box for label='person'
-    with largest bounding box area or highest confidence.
-    Returns {} if no person found.
-    """
-    person_detections = [d for d in detections if d["label"].lower() == "person"]
-    if not person_detections:
-        return {}
+def generate_feedback(obj_cx, obj_cy, user_cx, user_cy, left_wrist, right_wrist, object_area):
+    offset_x = obj_cx - user_cx
+    offset_y = obj_cy - user_cy
 
-    # Option B: largest bounding box area
-    def bbox_area(d):
-        x1, y1, x2, y2 = d["bbox"]
-        return (x2 - x1) * (y2 - y1)
-
-    best_person = max(person_detections, key=bbox_area)
-    return best_person
-
-
-def get_direction_string(
-    obj_center_x: float,
-    obj_center_y: float,
-    ref_center_x: float,
-    ref_center_y: float,
-    object_area: float = 0.0
-) -> str:
-    """
-    Return approximate direction + distance from person center to object center.
-    Negative offset_x => left, positive => right;
-    Negative offset_y => above, positive => below.
-    Also uses bounding box area to guess distance.
-    """
-    offset_x = obj_center_x - ref_center_x
-    offset_y = obj_center_y - ref_center_y
-
-    # Horizontal direction
-    horizontal_dir = ""
+    # horizontal
     abs_x = abs(offset_x)
     if abs_x < 30:
-        horizontal_dir = "center (same horizontal)"
+        horiz = "center"
     elif abs_x < 100:
-        horizontal_dir = "slightly left" if offset_x < 0 else "slightly right"
+        horiz = "a bit to your right" if offset_x < 0 else "a bit to your left"
     else:
-        horizontal_dir = "far left" if offset_x < 0 else "far right"
+        horiz = "far right" if offset_x < 0 else "far left"
 
-    # Vertical direction
-    vertical_dir = ""
+    # vertical
     abs_y = abs(offset_y)
     if abs_y < 30:
-        vertical_dir = "same height"
+        vert = "same level"
     elif abs_y < 100:
-        vertical_dir = "slightly above" if offset_y < 0 else "slightly below"
+        vert = "slightly above" if offset_y < 0 else "slightly below"
     else:
-        vertical_dir = "far above" if offset_y < 0 else "far below"
+        vert = "far above" if offset_y < 0 else "far below"
 
-    # Combine
-    if "center (same horizontal)" in horizontal_dir and "same height" in vertical_dir:
-        direction_str = "in front of you"
+    if horiz == "center" and vert == "same level":
+        dir_str = "directly in front of you"
     else:
-        direction_str = f"{horizontal_dir} and {vertical_dir}"
+        dir_str = f"{horiz}, {vert}"
 
-    # Distance from bounding box area
-    # Tweak thresholds to your environment
+    # distance by object_area
     if object_area > 120000:
-        distance_str = "very close"
+        dist_str = "very close"
     elif object_area > 40000:
-        distance_str = "close"
+        dist_str = "close"
     elif object_area > 10000:
-        distance_str = "medium distance"
+        dist_str = "medium distance"
     else:
-        distance_str = "far away"
+        dist_str = "far away"
 
-    if direction_str == "in front of you":
-        return f"{direction_str}, appears {distance_str}"
+    # which hand
+    dist_left = 9999
+    dist_right = 9999
+    if left_wrist:
+        lx, ly = left_wrist
+        dist_left = math.hypot(obj_cx - lx, obj_cy - ly)
+    if right_wrist:
+        rx, ry = right_wrist
+        dist_right = math.hypot(obj_cx - rx, obj_cy - ry)
+
+    if min(dist_left, dist_right) < 120:
+        if dist_left < dist_right:
+            hand_str = "near your left hand"
+        else:
+            hand_str = "near your right hand"
     else:
-        return f"{direction_str}, appears {distance_str}"
+        hand_str = "near your body"
 
+    return f"The object is {dir_str}, {dist_str}, {hand_str}."
 
-# ----------------------------------------------------------------------
-# Detection Loop
-# ----------------------------------------------------------------------
-def run_person_relative_detection(object_name: str, config: Dict[str, Any]):
+def run_detection(obj_name: str, config: Dict[str,Any], speaker: GTTSSpeaker, state: SharedState):
     """
-    Opens camera, detects both 'person' and target object. 
-    Provides directions relative to person's bounding box center.
+    Runs YOLO + MediaPipe. 
+    - Times out after 30s if object not found at all.
+    - If user says hey assistant in the background thread => state.interrupt_detection = True => we stop
     """
-    logger.info("User wants to find: '%s' with person-relative logic.", object_name)
+    if speaker:
+        speaker.speak(f"Looking for {obj_name} now. I'll let you know if I find it.")
+
+    # load YOLO
+    from vision.object_detection import YOLODetector
+    from vision.mediapipe_tracker import MediaPipeTracker
+    from integration.detection_filter import filter_detections
 
     model_path = config.get("vision", {}).get("model_path", "models/yolo/yolov5m_Objects365.pt")
-    conf_thr = config.get("vision", {}).get("confidence_threshold", 0.25)
+    conf_thr = config.get("vision", {}).get("confidence_threshold", 0.10)
     iou_thr = config.get("vision", {}).get("nms_threshold", 0.45)
-
     detector = YOLODetector(weights_path=model_path, conf_threshold=conf_thr, iou_threshold=iou_thr)
-    logger.info("YOLOv5 model loaded. Attempting to detect person + '%s'...", object_name)
 
-    camera_index = config.get("device", {}).get("camera_index", 0)
-    cap = cv2.VideoCapture(camera_index)
+    mp_tracker = MediaPipeTracker()
+
+    cap = cv2.VideoCapture(config.get("device", {}).get("camera_index", 0))
     if not cap.isOpened():
-        logger.error("Could not open camera (index=%s). Exiting detection loop.", camera_index)
+        if speaker:
+            speaker.speak("Camera not available. Cancelling detection.")
         return
 
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    # set resolution to speed up
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
 
-    frame_count = 0
-    logger.info("Press 'Q' to quit this detection session.")
+    start_time = time.time()
+    found_any_object = False
+    frames_since_speak = 0
+    grab_frames_count = 0
+    last_spoken_text = None
 
-    try:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                logger.warning("Failed to read frame from camera. Breaking loop.")
-                break
+    while True:
+        if state.exit_program:
+            logger.info("System exit flagged. Stopping detection.")
+            break
+        if state.interrupt_detection:
+            logger.info("Detection interrupted by new wake word.")
+            break
 
-            frame_count += 1
-            # Skip frames for performance
-            if frame_count % 2 != 0:
-                cv2.imshow("AIVOL - Person Relative", frame)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
-                continue
+        elapsed = time.time() - start_time
+        if elapsed > OBJECT_FIND_TIMEOUT_SECS and not found_any_object:
+            if speaker:
+                speaker.speak("I could not find that object. Please move the camera or try again.")
+            break
 
-            detections = detector.detect(frame)
-            if not detections:
-                cv2.putText(frame, "No detections", (30,30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,0,255), 2)
-                cv2.imshow("AIVOL - Person Relative", frame)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
-                continue
+        ret, frame = cap.read()
+        if not ret:
+            logger.warning("Failed to read camera.")
+            break
 
-            # Identify the best person
-            best_person = find_best_person(detections)
+        # YOLO detect
+        detections = detector.detect(frame)
+        filtered = filter_detections({"name": obj_name}, detections)
 
-            # Filter for the target object
-            filtered = filter_detections({"name": object_name}, detections)
-
-            direction_text = ""
-            if best_person:
-                # Draw person's bounding box
-                x1p, y1p, x2p, y2p = map(int, best_person["bbox"])
-                cv2.rectangle(frame, (x1p, y1p), (x2p, y2p), (255, 0, 0), 2)
-                cv2.putText(frame, "Person",
-                            (x1p, y1p - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
-            else:
-                # No person => fallback or warn
-                cv2.putText(frame, "No person found in frame", (30,30),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
-
-            if filtered:
-                obj_det = filtered[0]
-                x1o, y1o, x2o, y2o = map(int, obj_det["bbox"])
-                cv2.rectangle(frame, (x1o, y1o), (x2o, y2o), (0, 255, 0), 2)
-                cv2.putText(
-                    frame,
-                    f"{obj_det['label']} {obj_det['confidence']:.2f}",
-                    (x1o, y1o - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 255, 0),
-                    2
-                )
-
-                # Person center or fallback to frame center
-                if best_person:
-                    px_center = (x1p + x2p) / 2.0
-                    py_center = (y1p + y2p) / 2.0
-                else:
-                    frame_h, frame_w = frame.shape[:2]
-                    px_center = frame_w / 2.0
-                    py_center = frame_h / 2.0
-
-                ox_center = (x1o + x2o) / 2.0
-                oy_center = (y1o + y2o) / 2.0
-                obj_area = (x2o - x1o) * (y2o - y1o)
-
-                direction_text = get_direction_string(ox_center, oy_center, px_center, py_center, obj_area)
-                logger.info("Object direction: %s", direction_text)
-
-                cv2.putText(
-                    frame,
-                    direction_text,
-                    (30, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 0, 255),
-                    2
-                )
-            else:
-                cv2.putText(
-                    frame,
-                    f"Target '{object_name}' not found",
-                    (30, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 0, 255),
-                    2
-                )
-
-            cv2.imshow("AIVOL - Person Relative", frame)
+        user_landmarks = mp_tracker.process_frame(frame)
+        if not user_landmarks:
+            cv2.putText(frame, "No user landmarks", (30,30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255),2)
+            cv2.imshow("AIVOL - Threaded", frame)
             if cv2.waitKey(1) & 0xFF == ord('q'):
-                logger.info("User pressed 'q'. Exiting detection.")
                 break
+            continue
 
-    except KeyboardInterrupt:
-        logger.info("KeyboardInterrupt in detection loop.")
-    finally:
-        cap.release()
-        cv2.destroyAllWindows()
-        logger.info("Person-relative detection session ended.")
+        if "mid_shoulder" in user_landmarks:
+            user_cx, user_cy = user_landmarks["mid_shoulder"]
+        else:
+            user_cx, user_cy = (frame.shape[1]//2, frame.shape[0]//2)
 
+        left_wrist = user_landmarks.get("left_wrist")
+        right_wrist = user_landmarks.get("right_wrist")
 
-# ----------------------------------------------------------------------
-# Main Loop (Wake Word => Command => Person-Relative Detection)
-# ----------------------------------------------------------------------
+        if not filtered:
+            cv2.putText(frame, f"Target '{obj_name}' not found", (30,30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255),2)
+            cv2.imshow("AIVOL - Threaded", frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+            continue
+
+        found_any_object = True
+
+        # pick nearest
+        best_obj = choose_nearest_object(filtered, user_cx, user_cy)
+        if not best_obj:
+            cv2.putText(frame, "No nearest obj", (30,30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255),2)
+            cv2.imshow("AIVOL - Threaded", frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+            continue
+
+        x1, y1, x2, y2 = map(int, best_obj["bbox"])
+        cv2.rectangle(frame, (x1,y1), (x2,y2), (0,255,0),2)
+        label = best_obj["label"]
+        conf = best_obj["confidence"]
+        cv2.putText(frame, f"{label} {conf:.2f}", (x1,y1-10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,0),2)
+
+        obj_cx = (x1 + x2)//2
+        obj_cy = (y1 + y2)//2
+        obj_area = (x2 - x1)*(y2 - y1)
+
+        # direction
+        direction_text = generate_feedback(obj_cx, obj_cy, user_cx, user_cy,
+                                           left_wrist, right_wrist, obj_area)
+        cv2.putText(frame, direction_text, (30,30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255),2)
+
+        # grabbing
+        grabbed_this_frame = False
+        if right_wrist:
+            rx, ry = right_wrist
+            if math.hypot(obj_cx - rx, obj_cy - ry) < 40:
+                grabbed_this_frame = True
+        if left_wrist and not grabbed_this_frame:
+            lx, ly = left_wrist
+            if math.hypot(obj_cx - lx, obj_cy - ly) < 40:
+                grabbed_this_frame = True
+
+        if grabbed_this_frame:
+            grab_frames_count += 1
+        else:
+            grab_frames_count = 0
+
+        if grab_frames_count >= 6:
+            if speaker:
+                speaker.speak(f"You've firmly grabbed the {obj_name}. Good job!")
+            break
+
+        # speak directions ~ every 5 frames
+        frames_since_speak += 1
+        if direction_text and frames_since_speak > 5:
+            if speaker:
+                speaker.speak(direction_text)
+            frames_since_speak = 0
+
+        cv2.imshow("AIVOL - Threaded", frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+    logger.info("Detection for %s done." % obj_name)
+
 def main():
-    logger.info("Starting AIVOL Main (Wake Word + Person-Relative).")
-
+    logger.info("Starting AIVOL with threaded wake-word approach.")
     config = load_config()
     initialize_system()
 
+    from audio.text_to_speech_gTTS import GTTSSpeaker
+    speaker = GTTSSpeaker(language="en", slow=False, output_folder="audio_outputs")
+
+    # shared state
+    state = SharedState()
+
+    # background thread for wake word
+    t = threading.Thread(target=wake_word_listener, args=(state, speaker), daemon=True)
+    t.start()
+
     while True:
-        # 1) Wait for "Hey Assistant"
-        woke = listen_for_wake_word()
-        if not woke:
-            logger.info("Exiting main loop. (KeyboardInterrupt or error in wake word).")
+        if state.exit_program:
             break
 
-        # 2) Listen for user command (e.g., "Find my cup")
-        user_cmd = listen_for_command()
+        # Wait for initial "Hey Assistant"
+        logger.info("[Main] Looking for initial wake word.")
+        woke = wait_for_initial_wake_word(state, speaker)
+        if not woke or state.exit_program:
+            logger.info("Exiting main loop.")
+            break
+
+        # get user command
+        user_cmd = get_user_command(speaker)
         if not user_cmd:
-            logger.info("No user command recognized; returning to idle.")
+            logger.info("No user command recognized. Return to idle.")
             continue
 
-        # 3) Parse object from user command
+        from text.text_processor import process_user_prompt
         obj_info = process_user_prompt(user_cmd)
         if not obj_info.name:
-            logger.warning("Could not parse an object from command '%s'.", user_cmd)
+            if speaker:
+                speaker.speak("I couldn't understand which object to find.")
             continue
 
-        # 4) Person-relative detection
-        run_person_relative_detection(obj_info.name, config)
+        # reset detection interrupt
+        state.interrupt_detection = False
 
-        # 5) Return to idle (wake word listening)
-        logger.info("Finished detection. Returning to wake word state...")
+        # run detection
+        run_detection(obj_info.name, config, speaker, state)
 
-    logger.info("AIVOL system shutting down.")
+        # if we didn't forcibly interrupt, we speak done
+        if not state.interrupt_detection:
+            if speaker:
+                speaker.speak("Detection finished. Returning to idle mode.")
+        else:
+            logger.info("Detection interrupted. Returning to idle.")
+            state.interrupt_detection = False
 
+    state.exit_program = True
+    logger.info("Stopping. The wake-word thread ends with main thread.")
+    logger.info("Program ended.")
+
+def wait_for_initial_wake_word(state: SharedState, speaker: GTTSSpeaker) -> bool:
+    """
+    Synchronously wait for "hey assistant" with a short approach.
+    If user says "exit," we set exit_program and return False.
+    If user says "hey assistant," return True.
+    """
+    while not state.exit_program:
+        phrase = get_voice_command(
+            timeout=WAKE_TIMEOUT,
+            phrase_time_limit=WAKE_PHRASE_LIMIT,
+            ambient_noise_duration=0.5
+        )
+        if phrase is None:
+            logger.info("No wake word detected. Retrying...")
+            continue
+        phrase = phrase.lower().strip()
+        logger.info("Heard: '%s'", phrase)
+        if phrase in WAKE_WORD_ALTS:
+            logger.info("Wake word detected!")
+            return True
+        elif phrase == "exit":
+            state.exit_program = True
+            return False
+        else:
+            logger.info("Not the wake word.")
+    return False
 
 if __name__ == "__main__":
     main()

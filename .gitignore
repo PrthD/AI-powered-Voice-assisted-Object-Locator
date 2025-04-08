@@ -25,3 +25,6 @@ models/yolo/yolov5m_Objects365.pt
 
 # User-Specific Configuration
 *.swp  # Vim swap files
+
+# Audio output
+audio_outputs/
